@@ -3,10 +3,12 @@ from tkinter import ttk, scrolledtext
 import threading
 import queue
 import os
+import shutil
 import subprocess
 import yt_dlp
 
 SAVE_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "saved_audio")
+OMNIZART_FALLBACK = os.path.expanduser("~/.omnizart-env/bin/omnizart")
 
 
 class LogHandler:
@@ -28,8 +30,9 @@ class LogHandler:
         self.q.put(("log", f"ERROR: {msg}"))
 
 
-def download_audio(url: str, log_queue: queue.Queue):
+def download_audio(url: str, log_queue: queue.Queue, transcribe: bool = False):
     os.makedirs(SAVE_DIR, exist_ok=True)
+    mp3_store: list[str] = []
     ydl_opts = {
         "format": "bestaudio/best",
         "outtmpl": os.path.join(SAVE_DIR, "%(title)s.%(ext)s"),
@@ -40,25 +43,74 @@ def download_audio(url: str, log_queue: queue.Queue):
                 "preferredquality": "192",
             }
         ],
+        "ffmpeg_location": "/opt/homebrew/bin",
         "logger": LogHandler(log_queue),
-        "progress_hooks": [lambda d: _progress_hook(d, log_queue)],
+        "progress_hooks": [lambda d: _progress_hook(d, log_queue, mp3_store)],
     }
     try:
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             ydl.download([url])
-        log_queue.put(("done", "Download complete."))
+
+        if transcribe and mp3_store:
+            log_queue.put(("log", "Download complete. Starting drum transcription…"))
+            _run_transcription(mp3_store[0], log_queue)
+        else:
+            log_queue.put(("done", "Download complete."))
     except Exception as e:
         log_queue.put(("error", str(e)))
 
 
-def _progress_hook(d: dict, log_queue: queue.Queue):
+def _progress_hook(d: dict, log_queue: queue.Queue, mp3_store: list):
     if d["status"] == "downloading":
         pct = d.get("_percent_str", "").strip()
         speed = d.get("_speed_str", "").strip()
         eta = d.get("_eta_str", "").strip()
         log_queue.put(("progress", f"Downloading… {pct}  speed: {speed}  ETA: {eta}"))
     elif d["status"] == "finished":
+        mp3_path = os.path.splitext(d["filename"])[0] + ".mp3"
+        mp3_store.append(mp3_path)
         log_queue.put(("log", f"Saved: {os.path.basename(d['filename'])}"))
+
+
+def _run_transcription(mp3_path: str, log_queue: queue.Queue):
+    omnizart_bin = shutil.which("omnizart") or (
+        OMNIZART_FALLBACK if os.path.exists(OMNIZART_FALLBACK) else None
+    )
+    if not omnizart_bin:
+        log_queue.put(("error", "omnizart not found. See README for setup instructions."))
+        return
+
+    log_queue.put(("progress", "Transcribing drums (this may take several minutes)…"))
+
+    env = os.environ.copy()
+    env["PATH"] = "/opt/homebrew/bin:/usr/local/bin:" + env.get("PATH", "")
+
+    result = subprocess.run(
+        [omnizart_bin, "drum", "transcribe", mp3_path, "-o", SAVE_DIR],
+        capture_output=True,
+        text=True,
+        env=env,
+    )
+
+    if result.returncode != 0:
+        log_queue.put(("error", f"omnizart failed:\n{result.stderr.strip()}"))
+        return
+
+    stem = os.path.splitext(os.path.basename(mp3_path))[0]
+    midi_path = os.path.join(SAVE_DIR, stem + ".mid")
+
+    if not os.path.exists(midi_path):
+        log_queue.put(("error", f"MIDI file not found after transcription: {midi_path}"))
+        return
+
+    log_queue.put(("midi_done", midi_path))
+
+
+def _open_musescore(midi_path: str):
+    for app in ("MuseScore 4", "MuseScore 3", "MuseScore"):
+        if subprocess.run(["open", "-a", app, midi_path], capture_output=True).returncode == 0:
+            return
+    subprocess.run(["open", midi_path])
 
 
 class App(tk.Tk):
@@ -117,15 +169,23 @@ class App(tk.Tk):
         )
         self.dl_btn.pack(side="left")
 
+        self.transcribe_var = tk.BooleanVar(value=False)
+        tk.Checkbutton(
+            self,
+            text="Transcribe drum part to MIDI  (requires omnizart — see README)",
+            variable=self.transcribe_var,
+            font=("Helvetica", 11),
+            anchor="w",
+        ).pack(padx=22, anchor="w", pady=(10, 0))
+
         self.status_var = tk.StringVar(value="Ready.")
-        status_label = tk.Label(
+        tk.Label(
             self,
             textvariable=self.status_var,
             font=("Helvetica", 11),
             fg="#444444",
             anchor="w",
-        )
-        status_label.pack(padx=20, fill="x", pady=(10, 2))
+        ).pack(padx=20, fill="x", pady=(10, 2))
 
         self.progress = ttk.Progressbar(self, mode="indeterminate", length=560)
         self.progress.pack(padx=20, pady=(0, 8))
@@ -142,13 +202,12 @@ class App(tk.Tk):
         )
         self.log_box.pack(padx=20, pady=(0, 20))
 
-        save_note = tk.Label(
+        tk.Label(
             self,
             text=f"Files saved to: {SAVE_DIR}",
             font=("Helvetica", 10),
             fg="#888888",
-        )
-        save_note.pack(pady=(0, 14))
+        ).pack(pady=(0, 14))
 
     def _log(self, text: str):
         self.log_box.configure(state="normal")
@@ -168,12 +227,11 @@ class App(tk.Tk):
         self.status_var.set("Downloading…")
         self.url_var.set("")
 
-        thread = threading.Thread(
+        threading.Thread(
             target=download_audio,
-            args=(url, self.log_queue),
+            args=(url, self.log_queue, self.transcribe_var.get()),
             daemon=True,
-        )
-        thread.start()
+        ).start()
 
     def _poll_queue(self):
         try:
@@ -181,12 +239,17 @@ class App(tk.Tk):
                 kind, msg = self.log_queue.get_nowait()
                 if kind == "progress":
                     self.status_var.set(msg)
-                elif kind in ("log",):
+                elif kind == "log":
                     self._log(msg)
                 elif kind == "done":
                     self._log(msg)
                     self._finish()
                     subprocess.run(["open", SAVE_DIR])
+                elif kind == "midi_done":
+                    self._log(f"MIDI saved: {os.path.basename(msg)}")
+                    self._finish()
+                    subprocess.run(["open", SAVE_DIR])
+                    _open_musescore(msg)
                 elif kind == "error":
                     self._log(f"Error: {msg}")
                     self.status_var.set("Error — see log above.")
@@ -197,6 +260,7 @@ class App(tk.Tk):
 
     def _finish(self):
         self.progress.stop()
+        self.status_var.set("Ready.")
         self.dl_btn.configure(state="normal")
         self.url_entry.configure(state="normal")
         self.url_entry.focus_set()
