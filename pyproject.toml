@@ -1,0 +1,12 @@
+[project]
+name = "audio-lifter"
+version = "0.1.0"
+description = "GUI tool for downloading YouTube audio as MP3"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "yt-dlp>=2026.3.17",
+]
+
+[project.scripts]
+audio-lifter = "main:main"
