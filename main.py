@@ -3,6 +3,7 @@ from tkinter import ttk, scrolledtext
 import threading
 import queue
 import os
+import subprocess
 import yt_dlp
 
 SAVE_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "saved_audio")
@@ -70,14 +71,12 @@ class App(tk.Tk):
         self._poll_queue()
 
     def _build_ui(self):
-        pad = {"padx": 20, "pady": 10}
-
         header = tk.Label(
             self,
             text="Audio Lifter",
             font=("Helvetica", 22, "bold"),
         )
-        header.pack(**pad, pady=(20, 4))
+        header.pack(padx=20, pady=(20, 4))
 
         subtitle = tk.Label(
             self,
@@ -187,6 +186,7 @@ class App(tk.Tk):
                 elif kind == "done":
                     self._log(msg)
                     self._finish()
+                    subprocess.run(["open", SAVE_DIR])
                 elif kind == "error":
                     self._log(f"Error: {msg}")
                     self.status_var.set("Error — see log above.")
