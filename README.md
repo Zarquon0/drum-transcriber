@@ -67,63 +67,43 @@ Double-click **Audio Lifter** on your Desktop to launch the app at any time. If 
 
 ## Drum transcription to MIDI (optional)
 
-Enabling the **"Transcribe drum part to MIDI"** checkbox in the app will pipe the downloaded audio through [omnizart](https://github.com/Music-and-Culture-Technology-Lab/omnizart) to extract the drum part as a MIDI file, then open it automatically in MuseScore.
+Enabling the **"Transcribe drum part to MIDI"** checkbox runs omnizart locally to extract the drum part as a MIDI file, then opens it automatically in MuseScore.
 
-omnizart requires **Python 3.8** and cannot be installed into the main project environment. Set it up in its own isolated environment as follows.
+omnizart requires a patched environment due to Apple Silicon and dependency compatibility issues. The setup script handles everything automatically.
 
-### 1. Install Python 3.8 via pyenv
+### 1. Run the setup script
 
-```bash
-brew install pyenv
-pyenv install 3.8.18
-```
-
-### 2. Create a dedicated omnizart environment
+From the project root, run once:
 
 ```bash
-~/.pyenv/versions/3.8.18/bin/python -m venv ~/.omnizart-env
-source ~/.omnizart-env/bin/activate
-pip install omnizart
+zsh setup_omnizart.sh
 ```
 
-### 3. Download the model checkpoints
+This will:
+- Create a conda environment at `~/.omnizart-env` with Python 3.9
+- Install ARM-native TensorFlow 2.9 with Metal GPU acceleration
+- Build and install all required dependencies with compatible version pins
+- Install a stub for the `vamp` Vamp plugin (ARM-incompatible; not needed for drum transcription)
+- Patch omnizart's model loader to use `model_from_json` instead of the removed `model_from_yaml`
+- Download the drum model checkpoint (~30 MB)
 
-This is a one-time download (roughly 1–2 GB):
+The script is safe to re-run — each step checks whether it has already completed.
 
-```bash
-omnizart download-checkpoints
-deactivate
-```
+**Prerequisite:** [Anaconda](https://www.anaconda.com/download) or [Miniconda](https://docs.conda.io/en/latest/miniconda.html) must be installed.
 
-### 4. Add omnizart to your PATH
-
-Add the following line to your `~/.zshrc` (or `~/.bash_profile`):
-
-```bash
-export PATH="$HOME/.omnizart-env/bin:$PATH"
-```
-
-Then reload your shell:
-
-```bash
-source ~/.zshrc
-```
-
-The app also checks `~/.omnizart-env/bin/omnizart` directly as a fallback, so this step is only strictly required when running from the Desktop icon.
-
-### 5. Install MuseScore
+### 2. Install MuseScore
 
 Download and install [MuseScore](https://musescore.org/en/download) (version 3 or 4). After transcription completes the MIDI file will open in MuseScore automatically.
 
 ### Usage
 
-Check **"Transcribe drum part to MIDI"** before clicking Download. After the audio is saved, omnizart will run (expect a few minutes of processing time), and the resulting `.mid` file will open in MuseScore alongside the `.mp3` in Finder.
+Check **"Transcribe drum part to MIDI"** before clicking Download. After the audio is saved, omnizart will run (expect a few minutes) and the resulting `.mid` file will open in MuseScore alongside the audio file in Finder. Omnizart's processing stages are logged in real-time in the app's log window.
 
 ---
 
 ## How it works
 
 1. Paste a YouTube URL into the text box and press **Download** (or hit Return).
-2. yt-dlp fetches the best available audio stream and ffmpeg converts it to 192 kbps MP3.
+2. yt-dlp fetches the best available audio stream and ffmpeg converts it to WAV.
 3. On completion, a Finder window opens to the `saved_audio/` folder.
-4. If drum transcription is enabled, omnizart analyses the audio and writes a `.mid` file to the same folder, which then opens in MuseScore.
+4. If drum transcription is enabled, omnizart analyses the audio using Metal GPU acceleration and writes a `.mid` file to the same folder, which then opens in MuseScore.

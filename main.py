@@ -3,12 +3,14 @@ from tkinter import ttk, scrolledtext
 import threading
 import queue
 import os
-import shutil
+import re
 import subprocess
 import yt_dlp
 
+_ANSI_RE = re.compile(r"\x1b\[[0-9;]*[mGKHF]")
+
 SAVE_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "saved_audio")
-OMNIZART_FALLBACK = os.path.expanduser("~/.omnizart-env/bin/omnizart")
+OMNIZART_BIN = os.path.expanduser("~/.omnizart-env/bin/omnizart")
 
 
 class LogHandler:
@@ -32,71 +34,82 @@ class LogHandler:
 
 def download_audio(url: str, log_queue: queue.Queue, transcribe: bool = False):
     os.makedirs(SAVE_DIR, exist_ok=True)
-    mp3_store: list[str] = []
+    wav_store: list[str] = []
     ydl_opts = {
         "format": "bestaudio/best",
         "outtmpl": os.path.join(SAVE_DIR, "%(title)s.%(ext)s"),
         "postprocessors": [
             {
                 "key": "FFmpegExtractAudio",
-                "preferredcodec": "mp3",
-                "preferredquality": "192",
+                "preferredcodec": "wav",
             }
         ],
         "ffmpeg_location": "/opt/homebrew/bin",
         "logger": LogHandler(log_queue),
-        "progress_hooks": [lambda d: _progress_hook(d, log_queue, mp3_store)],
+        "progress_hooks": [lambda d: _progress_hook(d, log_queue, wav_store)],
     }
     try:
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             ydl.download([url])
 
-        if transcribe and mp3_store:
+        if transcribe and wav_store:
             log_queue.put(("log", "Download complete. Starting drum transcription…"))
-            _run_transcription(mp3_store[0], log_queue)
+            _run_transcription(wav_store[0], log_queue)
         else:
             log_queue.put(("done", "Download complete."))
     except Exception as e:
         log_queue.put(("error", str(e)))
 
 
-def _progress_hook(d: dict, log_queue: queue.Queue, mp3_store: list):
+def _progress_hook(d: dict, log_queue: queue.Queue, wav_store: list):
     if d["status"] == "downloading":
         pct = d.get("_percent_str", "").strip()
         speed = d.get("_speed_str", "").strip()
         eta = d.get("_eta_str", "").strip()
         log_queue.put(("progress", f"Downloading… {pct}  speed: {speed}  ETA: {eta}"))
     elif d["status"] == "finished":
-        mp3_path = os.path.splitext(d["filename"])[0] + ".mp3"
-        mp3_store.append(mp3_path)
+        wav_path = os.path.splitext(d["filename"])[0] + ".wav"
+        wav_store.append(wav_path)
         log_queue.put(("log", f"Saved: {os.path.basename(d['filename'])}"))
 
 
-def _run_transcription(mp3_path: str, log_queue: queue.Queue):
-    omnizart_bin = shutil.which("omnizart") or (
-        OMNIZART_FALLBACK if os.path.exists(OMNIZART_FALLBACK) else None
-    )
-    if not omnizart_bin:
-        log_queue.put(("error", "omnizart not found. See README for setup instructions."))
+def _strip_ansi(text: str) -> str:
+    return _ANSI_RE.sub("", text)
+
+
+def _run_transcription(wav_path: str, log_queue: queue.Queue):
+    if not os.path.exists(OMNIZART_BIN):
+        log_queue.put(("error", f"omnizart not found at {OMNIZART_BIN}. See README for setup."))
         return
 
-    log_queue.put(("progress", "Transcribing drums (this may take several minutes)…"))
+    log_queue.put(("progress", "Transcribing drums — starting omnizart…"))
 
     env = os.environ.copy()
     env["PATH"] = "/opt/homebrew/bin:/usr/local/bin:" + env.get("PATH", "")
 
-    result = subprocess.run(
-        [omnizart_bin, "drum", "transcribe", mp3_path, "-o", SAVE_DIR],
-        capture_output=True,
+    proc = subprocess.Popen(
+        [OMNIZART_BIN, "drum", "transcribe", wav_path, "-o", SAVE_DIR],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,  # merge so all output arrives on one stream
         text=True,
         env=env,
     )
 
-    if result.returncode != 0:
-        log_queue.put(("error", f"omnizart failed:\n{result.stderr.strip()}"))
+    for raw_line in proc.stdout:
+        # Strip CR/LF and ANSI colour codes; skip blank lines and tqdm rewrites
+        line = raw_line.rstrip("\r\n")
+        line = _strip_ansi(line).strip()
+        if not line:
+            continue
+        log_queue.put(("log", line))
+
+    proc.wait()
+
+    if proc.returncode != 0:
+        log_queue.put(("error", "omnizart exited with an error — see log above."))
         return
 
-    stem = os.path.splitext(os.path.basename(mp3_path))[0]
+    stem = os.path.splitext(os.path.basename(wav_path))[0]
     midi_path = os.path.join(SAVE_DIR, stem + ".mid")
 
     if not os.path.exists(midi_path):
